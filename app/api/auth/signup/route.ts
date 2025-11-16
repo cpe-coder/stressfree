@@ -1,5 +1,4 @@
 import { generateVerificationCode, hashPassword } from "@/lib/auth";
-import { sendVerificationEmail } from "@/lib/email";
 import { getDatabase } from "@/lib/mongodb";
 import { NextRequest, NextResponse } from "next/server";
 
@@ -62,14 +61,13 @@ export async function POST(req: NextRequest) {
 
 		await usersCollection.insertOne(newUser);
 
-		// Send verification email
-		await sendVerificationEmail(email, verificationCode, username);
+		// ⛔ EMAIL REMOVED – We do not send it anymore
+		console.log("Generated verification code:", verificationCode);
 
 		return NextResponse.json({
 			success: true,
-			message: "Account created. Please verify your email.",
-			verificationCode:
-				process.env.NODE_ENV === "development" ? verificationCode : undefined,
+			message: "Account created successfully.",
+			verificationCode, // Return the code directly
 		});
 	} catch (error) {
 		console.error("Signup error:", error);

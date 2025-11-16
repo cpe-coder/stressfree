@@ -122,11 +122,7 @@ export default function BrainBreakGame() {
 
 			if (res.ok) {
 				setNeedsVerification(true);
-				alert(
-					`Account created! Verification code: ${
-						data.verificationCode || "Check your email"
-					}`
-				);
+				alert(`Account created! Verification code: ${data.verificationCode}`);
 			} else {
 				setAuthError(data.error);
 			}
