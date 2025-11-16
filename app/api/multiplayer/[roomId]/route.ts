@@ -1,6 +1,4 @@
-// ============================================
-// FILE: app/api/multiplayer/[roomId]/route.ts
-// ============================================
+// app/api/multiplayer/[roomId]/route.ts
 import { getDatabase } from "@/lib/mongodb";
 import { NextRequest, NextResponse } from "next/server";
 
@@ -9,7 +7,7 @@ export async function GET(
 	{ params }: { params: Promise<{ roomId: string }> }
 ) {
 	try {
-		const { roomId } = await params; // <-- Add await here
+		const { roomId } = await params;
 
 		const db = await getDatabase();
 		const roomsCollection = db.collection("rooms");
@@ -34,20 +32,25 @@ export async function PUT(
 	{ params }: { params: Promise<{ roomId: string }> }
 ) {
 	try {
-		const { roomId } = await params; // <-- Add await here
-		const { hostScore, guestScore, gameMode } = await req.json();
+		const { roomId } = await params;
+		const { hostScore, guestScore, gameMode, currentTurn, status } =
+			await req.json();
 
 		const db = await getDatabase();
 		const roomsCollection = db.collection("rooms");
 
+		// eslint-disable-next-line @typescript-eslint/no-explicit-any
 		const updateData: any = {};
 		if (hostScore !== undefined) updateData.hostScore = hostScore;
 		if (guestScore !== undefined) updateData.guestScore = guestScore;
 		if (gameMode) updateData.gameMode = gameMode;
+		if (currentTurn) updateData.currentTurn = currentTurn;
+		if (status) updateData.status = status;
 
 		await roomsCollection.updateOne({ roomId }, { $set: updateData });
 
 		const updatedRoom = await roomsCollection.findOne({ roomId });
+
 		return NextResponse.json({ room: updatedRoom });
 	} catch (error) {
 		console.error("Update room error:", error);

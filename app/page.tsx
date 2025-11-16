@@ -1,3 +1,4 @@
+// components/BrainBreakGame.tsx  (or your page component)
 "use client";
 
 import {
@@ -14,7 +15,7 @@ import {
 } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 
-type Difficulty = "easy" | "medium" | "hard";
+type Difficulty = "easy" | "medium" | "hard" | "expert" | "master";
 type GamePhase = "memorize" | "playing" | "finished";
 type AppScreen = "auth" | "lobby" | "waitingRoom" | "game";
 
@@ -44,12 +45,15 @@ interface GameRoom {
 	guestScore: number;
 	status: "waiting" | "playing" | "finished";
 	gameMode: string | null;
+	currentTurn?: "host" | "guest";
 }
 
 const DIFFICULTIES = {
 	easy: { pairs: 6, time: 120, memoryTime: 5 },
 	medium: { pairs: 8, time: 90, memoryTime: 4 },
 	hard: { pairs: 10, time: 60, memoryTime: 3 },
+	expert: { pairs: 12, time: 50, memoryTime: 2 },
+	master: { pairs: 15, time: 40, memoryTime: 2 },
 };
 
 const EMOJIS = [
@@ -69,6 +73,15 @@ const EMOJIS = [
 	"🏀",
 	"🎾",
 	"🏐",
+	"🎬",
+	"🎤",
+	"🎧",
+	"🎹",
+	"🎼",
+	"🎵",
+	"🎶",
+	"🎙️",
+	"📱",
 ];
 
 export default function BrainBreakGame() {
@@ -94,8 +107,9 @@ export default function BrainBreakGame() {
 	const [memoryPhase, setMemoryPhase] = useState(true);
 	const [copied, setCopied] = useState(false);
 	const [isPolling, setIsPolling] = useState(false);
+	const [currentTurn, setCurrentTurn] = useState<"host" | "guest">("host");
+	const [consecutiveMatches, setConsecutiveMatches] = useState(0);
 
-	// Auth handlers
 	const handleSignUp = async () => {
 		setAuthError("");
 		try {
@@ -174,6 +188,7 @@ export default function BrainBreakGame() {
 		setCurrentUser(null);
 		setScreen("auth");
 		setRoom(null);
+		setIsPolling(false);
 	};
 
 	// Game handlers using useCallback to prevent re-declaration issues
@@ -196,6 +211,7 @@ export default function BrainBreakGame() {
 		setTimeLeft(config.memoryTime);
 		setMemoryPhase(true);
 		setSelectedCards([]);
+		setCurrentTurn("host");
 		setScreen("game");
 	}, [difficulty]);
 
@@ -269,6 +285,26 @@ export default function BrainBreakGame() {
 		}
 	};
 
+	// helper to persist one or more fields to the room document in DB
+	const patchRoom = async (patch: Partial<GameRoom>) => {
+		if (!room) return;
+		try {
+			const res = await fetch(`/api/multiplayer/${room.roomId}`, {
+				method: "PUT",
+				headers: {
+					"Content-Type": "application/json",
+				},
+				body: JSON.stringify(patch),
+			});
+			const data = await res.json();
+			if (res.ok && data.room) {
+				setRoom(data.room);
+			}
+		} catch (err) {
+			console.error("Failed to patch room:", err);
+		}
+	};
+
 	const checkMatch = useCallback(
 		async (selected: number[], isHost: boolean) => {
 			const [first, second] = selected.map(
@@ -277,25 +313,22 @@ export default function BrainBreakGame() {
 
 			setTimeout(async () => {
 				if (first.value === second.value) {
+					// Match found! mark matched locally
 					setCards((prev) =>
 						prev.map((c) =>
 							selected.includes(c.id) ? { ...c, isMatched: true } : c
 						)
 					);
 
+					// update room score in DB
 					if (room) {
 						const newScore = isHost
 							? room.hostScore + 10
 							: room.guestScore + 10;
-
 						try {
-							await fetch(`/api/multiplayer/${room.roomId}`, {
-								method: "PUT",
-								headers: { "Content-Type": "application/json" },
-								body: JSON.stringify(
-									isHost ? { hostScore: newScore } : { guestScore: newScore }
-								),
-							});
+							await patchRoom(
+								isHost ? { hostScore: newScore } : { guestScore: newScore }
+							);
 						} catch (err) {
 							console.error("Failed to update score:", err);
 						}
@@ -303,16 +336,33 @@ export default function BrainBreakGame() {
 
 					setSelectedCards([]);
 
-					if (cards.filter((c) => !c.isMatched).length === 2) {
+					// check if game finished (no unmatched cards)
+					const remaining = cards.filter(
+						(c) => !c.isMatched && !selected.includes(c.id)
+					);
+					// if only 0 or 1 unmatched left after marking, end game.
+					if (cards.filter((c) => !c.isMatched).length <= 2) {
+						// Make sure we update DB status to 'finished'
+						if (room) {
+							await patchRoom({ status: "finished" });
+						}
 						endGame();
 					}
 				} else {
+					// No match - flip cards back
 					setCards((prev) =>
 						prev.map((c) =>
 							selected.includes(c.id) ? { ...c, isFlipped: false } : c
 						)
 					);
 					setSelectedCards([]);
+
+					// Switch turns and persist to DB so the opponent sees it on poll
+					const nextTurn = isHost ? "guest" : "host";
+					setCurrentTurn(nextTurn);
+					if (room) {
+						await patchRoom({ currentTurn: nextTurn });
+					}
 				}
 			}, 800);
 		},
@@ -325,11 +375,18 @@ export default function BrainBreakGame() {
 				return;
 
 			const isHost = currentUser.email === room.host;
-			const isMyTurn = isHost
-				? room.hostScore >= room.guestScore
-				: room.guestScore >= room.hostScore;
 
-			if (!isMyTurn && selectedCards.length === 0) return;
+			// Check turn from authoritative source: prefer room.currentTurn (from DB) if present
+			const authoritativeTurn = room.currentTurn ?? currentTurn;
+			const isMyTurn =
+				(isHost && authoritativeTurn === "host") ||
+				(!isHost && authoritativeTurn === "guest");
+
+			if (!isMyTurn) {
+				// quick guard but the UI should already be disabled
+				alert("It's not your turn!");
+				return;
+			}
 
 			const card = cards.find((c) => c.id === cardId);
 			if (
@@ -356,6 +413,7 @@ export default function BrainBreakGame() {
 			gamePhase,
 			room,
 			currentUser,
+			currentTurn,
 			selectedCards,
 			cards,
 			checkMatch,
@@ -370,12 +428,23 @@ export default function BrainBreakGame() {
 		}
 	};
 
-	const handleExitGame = () => {
+	const handleExitGame = async () => {
+		if (!room || !currentUser) return;
+
+		// allow either player to "end" the game; this sets status finished and both clients will observe it
 		if (
-			window.confirm(
-				"Are you sure you want to exit? Your progress will be lost."
+			!window.confirm(
+				"Are you sure you want to leave/end this game for both players?"
 			)
-		) {
+		)
+			return;
+
+		try {
+			await patchRoom({ status: "finished" });
+		} catch (err) {
+			console.error("Failed to set finished:", err);
+		} finally {
+			// local cleanup: we'll also rely on polling listener to route both players to lobby
 			setScreen("lobby");
 			setRoom(null);
 			setIsPolling(false);
@@ -383,6 +452,7 @@ export default function BrainBreakGame() {
 			setGamePhase("memorize");
 			setSelectedCards([]);
 			setMemoryPhase(true);
+			setCurrentTurn("host");
 		}
 	};
 
@@ -398,8 +468,28 @@ export default function BrainBreakGame() {
 				if (res.ok && data.room) {
 					setRoom(data.room);
 
+					// if someone joined and room moved to playing -> start game for both
 					if (data.room.status === "playing" && screen === "waitingRoom") {
 						startGame();
+					}
+
+					// if room finished -> route both players back to lobby
+					if (data.room.status === "finished") {
+						// perform cleanup on both clients
+						alert("Game ended");
+						setScreen("lobby");
+						setRoom(null);
+						setIsPolling(false);
+						setCards([]);
+						setGamePhase("memorize");
+						setSelectedCards([]);
+						setMemoryPhase(true);
+						setCurrentTurn("host");
+					}
+
+					// keep local currentTurn in sync with DB (authoritative)
+					if (data.room.currentTurn) {
+						setCurrentTurn(data.room.currentTurn);
 					}
 				}
 			} catch (err) {
@@ -412,40 +502,47 @@ export default function BrainBreakGame() {
 
 	// Memory phase countdown
 	useEffect(() => {
-		if (screen !== "game" || gamePhase !== "memorize" || timeLeft <= 0) return;
+		if (screen !== "game" || gamePhase !== "memorize") return;
 
-		const timer = setTimeout(() => setTimeLeft((prev) => prev - 1), 1000);
-		return () => clearTimeout(timer);
-	}, [screen, gamePhase, timeLeft]);
+		if (timeLeft > 0) {
+			const timer = setTimeout(() => setTimeLeft((prev) => prev - 1), 1000);
+			return () => clearTimeout(timer);
+		}
 
-	useEffect(() => {
-		if (gamePhase === "memorize" && timeLeft === 0) {
-			const t = setTimeout(() => {
+		if (timeLeft === 0) {
+			// Avoid synchronous state updates inside effect (lint)
+			queueMicrotask(() => {
 				setCards((prev) => prev.map((card) => ({ ...card, isFlipped: false })));
 				setGamePhase("playing");
 				setTimeLeft(DIFFICULTIES[difficulty].time);
 				setMemoryPhase(false);
-			}, 0);
-			return () => clearTimeout(t);
+			});
 		}
-	}, [gamePhase, timeLeft, difficulty]);
+	}, [screen, gamePhase, timeLeft, difficulty]);
 
 	// Game timer
 	useEffect(() => {
-		if (gamePhase !== "playing" || timeLeft <= 0) return;
+		if (gamePhase !== "playing") return;
 
-		const timer = setTimeout(() => setTimeLeft((prev) => prev - 1), 1000);
-		return () => clearTimeout(timer);
-	}, [gamePhase, timeLeft]);
-
-	useEffect(() => {
-		if (gamePhase === "playing" && timeLeft === 0) {
-			const t = setTimeout(() => {
-				endGame();
-			}, 0);
-			return () => clearTimeout(t);
+		if (timeLeft > 0) {
+			const timer = setTimeout(() => setTimeLeft((prev) => prev - 1), 1000);
+			return () => clearTimeout(timer);
 		}
-	}, [gamePhase, timeLeft, endGame]);
+
+		if (timeLeft === 0) {
+			queueMicrotask(() => {
+				// set room to finished so both clients will observe it on poll
+				if (room) {
+					patchRoom({ status: "finished" });
+				}
+				endGame();
+			});
+		}
+	}, [gamePhase, timeLeft, endGame, room]);
+
+	// ------------------
+	//  UI rendering below
+	// ------------------
 
 	// Auth Screen
 	if (screen === "auth") {
@@ -599,7 +696,7 @@ export default function BrainBreakGame() {
 							Select Difficulty
 						</h2>
 
-						<div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-8">
+						<div className="grid grid-cols-1 md:grid-cols-5 gap-4 mb-8">
 							{(Object.keys(DIFFICULTIES) as Difficulty[]).map((diff) => {
 								const config = DIFFICULTIES[diff];
 								return (
@@ -618,7 +715,7 @@ export default function BrainBreakGame() {
 										<div className="text-sm text-purple-100 space-y-1">
 											<p>🎯 {config.pairs} pairs</p>
 											<p>⏱️ {config.time}s</p>
-											<p>🧠 {config.memoryTime}s memory</p>
+											<p>🧠 {config.memoryTime}s</p>
 										</div>
 									</button>
 								);
@@ -716,11 +813,28 @@ export default function BrainBreakGame() {
 		const myScore = isHost ? room.hostScore : room.guestScore;
 		const opponentScore = isHost ? room.guestScore : room.hostScore;
 		const opponentName = isHost ? room.guestUsername : room.hostUsername;
-		const isMyTurn = myScore >= opponentScore;
+		// use authoritative currentTurn from DB if available
+		const authoritativeTurn = room.currentTurn ?? currentTurn;
+		const isMyTurn =
+			(isHost && authoritativeTurn === "host") ||
+			(!isHost && authoritativeTurn === "guest");
 
 		return (
 			<div className="min-h-screen bg-gradient-to-br from-purple-900 via-blue-900 to-indigo-900 p-4">
 				<div className="max-w-6xl mx-auto">
+					{/* Exit Button */}
+					{gamePhase !== "finished" && (
+						<div className="flex justify-end mb-4">
+							<button
+								onClick={handleExitGame}
+								className="flex items-center gap-2 bg-red-500/20 hover:bg-red-500/30 border border-red-500 text-red-200 px-4 py-2 rounded-lg transition-all"
+							>
+								<LogOut className="w-4 h-4" />
+								Exit Game
+							</button>
+						</div>
+					)}
+
 					{gamePhase === "memorize" && (
 						<div className="text-center mb-6">
 							<div className="bg-yellow-500/20 backdrop-blur-lg rounded-xl p-6 inline-block">
@@ -750,7 +864,9 @@ export default function BrainBreakGame() {
 									</p>
 									<p className="text-3xl font-bold text-white">{myScore}</p>
 									{isMyTurn && !memoryPhase && (
-										<p className="text-green-400 text-sm mt-1">Your turn!</p>
+										<p className="text-green-400 text-sm mt-1 animate-pulse">
+											🎯 Your turn!
+										</p>
 									)}
 								</div>
 								<div
@@ -765,7 +881,9 @@ export default function BrainBreakGame() {
 										{opponentScore}
 									</p>
 									{!isMyTurn && !memoryPhase && (
-										<p className="text-green-400 text-sm mt-1">Their turn!</p>
+										<p className="text-green-400 text-sm mt-1 animate-pulse">
+											🎯 Their turn!
+										</p>
 									)}
 								</div>
 							</div>
@@ -781,17 +899,21 @@ export default function BrainBreakGame() {
 								</div>
 							)}
 
-							<div className="grid grid-cols-4 gap-3">
+							<div className="grid grid-cols-4 md:grid-cols-6 gap-3">
 								{cards.map((card) => (
 									<button
 										key={card.id}
 										onClick={() => handleCardClick(card.id)}
-										disabled={card.isMatched || memoryPhase}
+										disabled={card.isMatched || memoryPhase || !isMyTurn}
 										className={`aspect-square rounded-xl text-4xl flex items-center justify-center transition-all ${
 											card.isFlipped || card.isMatched
 												? "bg-white shadow-lg"
 												: "bg-purple-500/50 hover:bg-purple-400/50"
-										} ${card.isMatched ? "opacity-50" : ""}`}
+										} ${card.isMatched ? "opacity-50" : ""} ${
+											!isMyTurn && !memoryPhase
+												? "cursor-not-allowed opacity-60"
+												: ""
+										}`}
 									>
 										{card.isFlipped || card.isMatched ? card.value : "?"}
 									</button>
@@ -834,6 +956,7 @@ export default function BrainBreakGame() {
 								onClick={() => {
 									setScreen("lobby");
 									setRoom(null);
+									setCurrentTurn("host");
 								}}
 								className="w-full bg-gradient-to-r from-purple-500 to-blue-500 text-white py-4 rounded-xl font-bold hover:from-purple-600 hover:to-blue-600 transition-all"
 							>

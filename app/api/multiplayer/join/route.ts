@@ -1,3 +1,4 @@
+// app/api/multiplayer/join/route.ts
 import { verifyToken } from "@/lib/auth";
 import { getDatabase } from "@/lib/mongodb";
 import { NextRequest, NextResponse } from "next/server";
@@ -10,9 +11,9 @@ export async function POST(req: NextRequest) {
 			return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 		}
 
-		const decoded = verifyToken(token) as { email: string };
+		const decoded = verifyToken(token) as { email: string } | null;
 
-		if (!decoded) {
+		if (!decoded || !decoded.email) {
 			return NextResponse.json({ error: "Invalid token" }, { status: 401 });
 		}
 
@@ -46,6 +47,7 @@ export async function POST(req: NextRequest) {
 					guest: user.email,
 					guestUsername: user.username,
 					status: "playing",
+					currentTurn: "host", // ensure host starts
 				},
 			}
 		);

@@ -1,3 +1,4 @@
+// app/api/multiplayer/create/route.ts
 import { verifyToken } from "@/lib/auth";
 import { getDatabase } from "@/lib/mongodb";
 import { NextRequest, NextResponse } from "next/server";
@@ -36,8 +37,9 @@ export async function POST(req: NextRequest) {
 			guest: null,
 			guestUsername: null,
 			guestScore: 0,
-			status: "waiting",
+			status: "waiting", // waiting until someone joins
 			gameMode: null,
+			currentTurn: "host", // initial turn
 			createdAt: new Date(),
 		};
 
