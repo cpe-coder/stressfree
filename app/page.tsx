@@ -1,5 +1,3 @@
-"use client";
-
 import {
 	Brain,
 	Check,
@@ -370,6 +368,22 @@ export default function BrainBreakGame() {
 		}
 	};
 
+	const handleExitGame = () => {
+		if (
+			window.confirm(
+				"Are you sure you want to exit? Your progress will be lost."
+			)
+		) {
+			setScreen("lobby");
+			setRoom(null);
+			setIsPolling(false);
+			setCards([]);
+			setGamePhase("memorize");
+			setSelectedCards([]);
+			setMemoryPhase(true);
+		}
+	};
+
 	// Poll room status
 	useEffect(() => {
 		if (!isPolling || !room) return;
@@ -404,13 +418,13 @@ export default function BrainBreakGame() {
 
 	useEffect(() => {
 		if (gamePhase === "memorize" && timeLeft === 0) {
-			const timer = window.setTimeout(() => {
+			const t = setTimeout(() => {
 				setCards((prev) => prev.map((card) => ({ ...card, isFlipped: false })));
 				setGamePhase("playing");
 				setTimeLeft(DIFFICULTIES[difficulty].time);
 				setMemoryPhase(false);
 			}, 0);
-			return () => clearTimeout(timer);
+			return () => clearTimeout(t);
 		}
 	}, [gamePhase, timeLeft, difficulty]);
 
@@ -424,11 +438,10 @@ export default function BrainBreakGame() {
 
 	useEffect(() => {
 		if (gamePhase === "playing" && timeLeft === 0) {
-			// Defer endGame to avoid cascading renders
-			const timer = setTimeout(() => {
+			const t = setTimeout(() => {
 				endGame();
 			}, 0);
-			return () => clearTimeout(timer);
+			return () => clearTimeout(t);
 		}
 	}, [gamePhase, timeLeft, endGame]);
 
