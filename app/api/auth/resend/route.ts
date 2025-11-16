@@ -1,5 +1,4 @@
 import { generateVerificationCode } from "@/lib/auth";
-import { sendVerificationEmail } from "@/lib/email";
 import { getDatabase } from "@/lib/mongodb";
 import { NextRequest, NextResponse } from "next/server";
 
@@ -23,20 +22,21 @@ export async function POST(req: NextRequest) {
 			);
 		}
 
+		// Generate new 6-digit code
 		const newCode = generateVerificationCode();
-		const newExpiry = new Date(Date.now() + 15 * 60 * 1000);
+		const newExpiry = new Date(Date.now() + 15 * 60 * 1000); // 15 min
 
 		await usersCollection.updateOne(
 			{ email: email.toLowerCase() },
 			{ $set: { verificationCode: newCode, verificationExpiry: newExpiry } }
 		);
 
-		await sendVerificationEmail(email, newCode, user.username);
+		// ⛔ Removed email sending
+		console.log("New verification code:", newCode);
 
 		return NextResponse.json({
 			success: true,
-			verificationCode:
-				process.env.NODE_ENV === "development" ? newCode : undefined,
+			verificationCode: newCode, // always return the code
 		});
 	} catch (error) {
 		console.error("Resend error:", error);
