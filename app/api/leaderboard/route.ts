@@ -1,3 +1,5 @@
+//api/leaderboard/route.ts
+
 import { getDatabase } from "@/lib/mongodb";
 import { NextResponse } from "next/server";
 

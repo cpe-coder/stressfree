@@ -35,6 +35,11 @@ interface UserData {
 	losses: number;
 }
 
+interface LeaderboardShape {
+	host: { username: string | null; score: number };
+	guest: { username: string | null; score: number };
+}
+
 interface GameRoom {
 	roomId: string;
 	host: string;
@@ -46,6 +51,9 @@ interface GameRoom {
 	status: "waiting" | "playing" | "finished";
 	gameMode: string | null;
 	currentTurn?: "host" | "guest";
+	// NEW: optional fields set at end of match so both players show same leaderboard
+	winner?: string | null;
+	leaderboard?: LeaderboardShape | null;
 }
 
 const DIFFICULTIES = {
@@ -211,31 +219,89 @@ export default function BrainBreakGame() {
 		setScreen("game");
 	}, [difficulty]);
 
-	const endGame = useCallback(async () => {
-		setGamePhase("finished");
-		setIsPolling(false);
-
-		if (room && currentUser) {
-			const isHost = currentUser.email === room.host;
-			const won = isHost
-				? room.hostScore > room.guestScore
-				: room.guestScore > room.hostScore;
-			const myScore = isHost ? room.hostScore : room.guestScore;
-
-			try {
-				await fetch("/api/user/stats", {
-					method: "PUT",
-					headers: {
-						Authorization: `Bearer ${authToken}`,
-						"Content-Type": "application/json",
-					},
-					body: JSON.stringify({ highScore: myScore, won }),
-				});
-			} catch (err) {
-				console.error("Failed to update stats:", err);
-			}
+	// helper: compute winner and leaderboard payload from current room
+	const computeWinnerAndLeaderboard = (r: GameRoom | null) => {
+		if (!r) {
+			return {
+				winner: null as string | null,
+				leaderboard: null as LeaderboardShape | null,
+			};
 		}
-	}, [room, currentUser, authToken]);
+		const hostScore = r.hostScore ?? 0;
+		const guestScore = r.guestScore ?? 0;
+		const winner =
+			hostScore === guestScore
+				? "draw"
+				: hostScore > guestScore
+				? r.hostUsername
+				: r.guestUsername;
+
+		const leaderboard: LeaderboardShape = {
+			host: { username: r.hostUsername ?? null, score: hostScore },
+			guest: { username: r.guestUsername ?? null, score: guestScore },
+		};
+
+		return { winner, leaderboard };
+	};
+
+	const endGame = useCallback(
+		async (forcePatch = false) => {
+			// local UI
+			setGamePhase("finished");
+			setIsPolling(false);
+
+			// prepare patch (if room exists)
+			if (room && currentUser) {
+				const { winner, leaderboard } = computeWinnerAndLeaderboard(room);
+
+				// ensure room saved with the leaderboard/winner — do not double-patch unnecessarily
+				// If the room already has status finished and leaderboard, skip if not forced.
+				const needPatch =
+					forcePatch ||
+					room.status !== "finished" ||
+					!room.leaderboard ||
+					typeof room.winner === "undefined";
+
+				if (needPatch) {
+					try {
+						await patchRoom({
+							status: "finished",
+							winner,
+							leaderboard,
+						} as Partial<GameRoom>);
+					} catch (err) {
+						console.error("Failed to patch room on endGame:", err);
+					}
+				}
+			}
+
+			// update user stats locally (best-effort)
+			if (room && currentUser) {
+				const isHost = currentUser.email === room.host;
+				const myScore = isHost ? room.hostScore : room.guestScore;
+				const won = room.winner
+					? room.winner === "draw"
+						? false
+						: room.winner === currentUser.username
+					: false;
+
+				try {
+					await fetch("/api/user/stats", {
+						method: "PUT",
+						headers: {
+							Authorization: `Bearer ${authToken}`,
+							"Content-Type": "application/json",
+						},
+						body: JSON.stringify({ highScore: myScore, won }),
+					});
+				} catch (err) {
+					console.error("Failed to update stats:", err);
+				}
+			}
+		},
+		// eslint-disable-next-line react-hooks/exhaustive-deps
+		[room, currentUser, authToken]
+	);
 
 	const createRoom = async () => {
 		try {
@@ -332,17 +398,45 @@ export default function BrainBreakGame() {
 
 					setSelectedCards([]);
 
-					// check if game finished (no unmatched cards)
+					// check if all cards matched (game finished)
+					// compute remaining AFTER marking matched above by looking at latest cards state
 					const remaining = cards.filter(
 						(c) => !c.isMatched && !selected.includes(c.id)
 					);
-					// if only 0 or 1 unmatched left after marking, end game.
-					if (cards.filter((c) => !c.isMatched).length <= 2) {
-						// Make sure we update DB status to 'finished'
+
+					// If there are no remaining unmatched cards -> perfect clear -> end game
+					if (remaining.length === 0) {
+						// compute payload and persist it so both clients see same leaderboard
 						if (room) {
-							await patchRoom({ status: "finished" });
+							const hostScore = room.hostScore ?? 0;
+							const guestScore = room.guestScore ?? 0;
+							const winner =
+								hostScore === guestScore
+									? "draw"
+									: hostScore > guestScore
+									? room.hostUsername
+									: room.guestUsername;
+							const leaderboard: LeaderboardShape = {
+								host: { username: room.hostUsername ?? null, score: hostScore },
+								guest: {
+									username: room.guestUsername ?? null,
+									score: guestScore,
+								},
+							};
+
+							try {
+								await patchRoom({ status: "finished", winner, leaderboard });
+							} catch (err) {
+								console.error(
+									"Failed to patch finished on perfect clear:",
+									err
+								);
+							}
 						}
+
+						// call endGame to flip local UI into finished as well
 						endGame();
+						return;
 					}
 				} else {
 					// No match - flip cards back
@@ -469,18 +563,14 @@ export default function BrainBreakGame() {
 						startGame();
 					}
 
-					// if room finished -> route both players back to lobby
+					// if room finished -> show finished UI to both players (do not auto-route to lobby)
 					if (data.room.status === "finished") {
-						// perform cleanup on both clients
-						alert("Game ended");
-						setScreen("lobby");
-						setRoom(null);
+						// show the finished UI and stop polling so the players can view leaderboard
+						setGamePhase("finished");
 						setIsPolling(false);
-						setCards([]);
-						setGamePhase("memorize");
-						setSelectedCards([]);
-						setMemoryPhase(true);
-						setCurrentTurn("host");
+						setScreen("game");
+						// ensure memory phase false so UI shows leaderboard
+						setMemoryPhase(false);
 					}
 
 					// keep local currentTurn in sync with DB (authoritative)
@@ -526,10 +616,19 @@ export default function BrainBreakGame() {
 		}
 
 		if (timeLeft === 0) {
-			queueMicrotask(() => {
-				// set room to finished so both clients will observe it on poll
+			queueMicrotask(async () => {
+				// set room to finished so both clients will observe it on poll AND save leaderboard
 				if (room) {
-					patchRoom({ status: "finished" });
+					const { winner, leaderboard } = computeWinnerAndLeaderboard(room);
+					try {
+						await patchRoom({
+							status: "finished",
+							winner,
+							leaderboard,
+						} as Partial<GameRoom>);
+					} catch (err) {
+						console.error("Failed to patch room on timer end:", err);
+					}
 				}
 				endGame();
 			});
@@ -815,6 +914,22 @@ export default function BrainBreakGame() {
 			(isHost && authoritativeTurn === "host") ||
 			(!isHost && authoritativeTurn === "guest");
 
+		// Displayed winner & leaderboard should come from room.leaderboard / room.winner to ensure both players see same thing
+		const displayedWinner =
+			room.winner ??
+			(() => {
+				// fallback compute if server hasn't set yet
+				const { winner } = computeWinnerAndLeaderboard(room);
+				return winner;
+			})();
+		const displayedLeaderboard = room.leaderboard ?? {
+			host: { username: room.hostUsername ?? null, score: room.hostScore ?? 0 },
+			guest: {
+				username: room.guestUsername ?? null,
+				score: room.guestScore ?? 0,
+			},
+		};
+
 		return (
 			<div className="min-h-screen bg-gradient-to-br from-purple-900 via-blue-900 to-indigo-900 p-4">
 				<div className="max-w-6xl mx-auto">
@@ -926,24 +1041,32 @@ export default function BrainBreakGame() {
 							<div className="bg-gradient-to-r from-yellow-500/20 to-orange-500/20 rounded-xl p-6 mb-6">
 								<p className="text-yellow-300 text-lg mb-2">Winner</p>
 								<p className="text-4xl font-bold text-white">
-									{myScore > opponentScore
-										? currentUser.username
-										: opponentName}
+									{displayedWinner === "draw" ? "Draw" : displayedWinner ?? "—"}
 								</p>
 								<p className="text-2xl text-purple-200 mt-2">
-									{Math.max(myScore, opponentScore)} points
+									{Math.max(
+										displayedLeaderboard.host.score,
+										displayedLeaderboard.guest.score
+									)}{" "}
+									points
 								</p>
 							</div>
 
 							<div className="grid grid-cols-2 gap-4 mb-6">
 								<div className="bg-white/10 rounded-lg p-4">
-									<p className="text-purple-200">{currentUser.username}</p>
-									<p className="text-2xl font-bold text-white">{myScore}</p>
+									<p className="text-purple-200">
+										{displayedLeaderboard.host.username ?? currentUser.username}
+									</p>
+									<p className="text-2xl font-bold text-white">
+										{displayedLeaderboard.host.score}
+									</p>
 								</div>
 								<div className="bg-white/10 rounded-lg p-4">
-									<p className="text-purple-200">{opponentName}</p>
+									<p className="text-purple-200">
+										{displayedLeaderboard.guest.username ?? opponentName}
+									</p>
 									<p className="text-2xl font-bold text-white">
-										{opponentScore}
+										{displayedLeaderboard.guest.score}
 									</p>
 								</div>
 							</div>
@@ -953,6 +1076,8 @@ export default function BrainBreakGame() {
 									setScreen("lobby");
 									setRoom(null);
 									setCurrentTurn("host");
+									setGamePhase("memorize");
+									setCards([]);
 								}}
 								className="w-full bg-gradient-to-r from-purple-500 to-blue-500 text-white py-4 rounded-xl font-bold hover:from-purple-600 hover:to-blue-600 transition-all"
 							>
